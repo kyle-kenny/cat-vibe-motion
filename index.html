@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>手势拆装动画 - Hand Gesture Control</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #fff;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    #container {
+      position: relative;
+      width: 640px;
+      height: 640px;
+    }
+    
+    #videoElement {
+      position: absolute;
+      top: 0; left: 0;
+      width: 640px;
+      height: 640px;
+      object-fit: cover;
+      border-radius: 16px;
+      transform: scaleX(-1);
+      z-index: 1;
+    }
+    
+    #canvasOutput {
+      position: absolute;
+      top: 0; left: 0;
+      width: 640px;
+      height: 640px;
+      border-radius: 16px;
+      z-index: 2;
+    }
+    
+    #overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 640px;
+      height: 640px;
+      border-radius: 16px;
+      z-index: 3;
+      pointer-events: none;
+    }
+    
+    #animationCanvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 640px;
+      height: 640px;
+      border-radius: 16px;
+      z-index: 2;
+      display: none;
+    }
+    
+    #handIndicator {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      background: rgba(0,0,0,0.7);
+      padding: 12px 24px;
+      border-radius: 30px;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.1);
+      text-align: center;
+    }
+    
+    #handState {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    
+    #opennessBar {
+      width: 200px;
+      height: 8px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    
+    #opennessFill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #ff6b6b, #51cf66);
+      border-radius: 4px;
+      transition: width 0.05s;
+    }
+    
+    #status {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      background: rgba(0,0,0,0.6);
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-size: 13px;
+      color: #aaa;
+      backdrop-filter: blur(10px);
+    }
+    
+    #instructions {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 5;
+      text-align: center;
+      color: #888;
+      font-size: 16px;
+      line-height: 1.8;
+    }
+    
+    #instructions .icon { font-size: 48px; margin-bottom: 12px; }
+    
+    #modeToggle {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      z-index: 10;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    
+    #modeToggle:hover { background: rgba(255,255,255,0.2); }
+    
+    .gesture-label {
+      position: absolute;
+      z-index: 10;
+      font-size: 64px;
+      transition: opacity 0.3s;
+    }
+    
+    #fistLabel { bottom: 80px; left: 40px; }
+    #openLabel { bottom: 80px; right: 40px; }
+  </style>
+</head>
+<body>
+
+  <div id="container">
+    <video id="videoElement" autoplay playsinline></video>
+    <canvas id="canvasOutput" width="640" height="640"></canvas>
+    <canvas id="animationCanvas" width="640" height="640"></canvas>
+    
+    <div id="status">🔄 正在加载手势识别模型...</div>
+    
+    <div id="instructions">
+      <div class="icon">🖐️</div>
+      <div>请允许摄像头权限</div>
+      <div style="font-size:13px; margin-top:8px; color:#666">
+        ✋ 手掌张开 → 零件散开<br>
+        ✊ 握拳收拢 → 零件归位
+      </div>
+    </div>
+    
+    <div id="handIndicator">
+      <div id="handState">等待手势...</div>
+      <div id="opennessBar"><div id="opennessFill"></div></div>
+    </div>
+    
+    <span id="fistLabel" class="gesture-label">✊</span>
+    <span id="openLabel" class="gesture-label">🖐️</span>
+    
+    <button id="modeToggle" onclick="toggleMode()">切换模式</button>
+  </div>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.min.js"></script>
+
+  <script>
+    const videoElement = document.getElementById('videoElement');
+    const canvasOutput = document.getElementById('canvasOutput');
+    const canvasCtx = canvasOutput.getContext('2d');
+    const animCanvas = document.getElementById('animationCanvas');
+    const animCtx = animCanvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const instructionsEl = document.getElementById('instructions');
+    const handStateEl = document.getElementById('handState');
+    const opennessFill = document.getElementById('opennessFill');
+    const fistLabel = document.getElementById('fistLabel');
+    const openLabel = document.getElementById('openLabel');
+    
+    let currentMode = 'video'; // 'video' or 'parts'
+    let smoothedOpenness = 0;
+    let lastOpenness = 0;
+    let handDetected = false;
+    
+    // Preload images for 'parts' mode
+    const imgAssembled = new Image();
+    const imgDisassembled = new Image();
+    imgAssembled.src = 'product-assembled.png';
+    imgDisassembled.src = 'product-parts.png';
+    
+    // Particles for transition effect
+    let particles = [];
+    
+    function initParticles() {
+      particles = [];
+      for (let i = 0; i < 60; i++) {
+        particles.push({
+          x: 320 + (Math.random() - 0.5) * 200,
+          y: 320 + (Math.random() - 0.5) * 200,
+          targetX: 320 + (Math.random() - 0.5) * 500,
+          targetY: 320 + (Math.random() - 0.5) * 500,
+          size: 4 + Math.random() * 12,
+          color: `hsl(${Math.random() * 60 + 20}, 80%, 60%)`,
+          speed: 0.02 + Math.random() * 0.03,
+          progress: 0
+        });
+      }
+    }
+    initParticles();
+    
+    function toggleMode() {
+      currentMode = currentMode === 'video' ? 'parts' : 'video';
+      document.getElementById('modeToggle').textContent = 
+        currentMode === 'video' ? '切换模式(零件)' : '切换模式(视频)';
+      animCanvas.style.display = currentMode === 'parts' ? 'block' : 'none';
+    }
+    
+    // Calculate hand openness from landmarks
+    function calcHandOpenness(landmarks) {
+      // Finger tip indices: thumb=4, index=8, middle=12, ring=16, pinky=20
+      // Finger MCP indices: thumb=2, index=5, middle=9, ring=13, pinky=17
+      // Wrist = 0
+      
+      const wrist = landmarks[0];
+      
+      // Calculate average distance of fingertips from wrist
+      const tips = [4, 8, 12, 16, 20];
+      const mcps = [2, 5, 9, 13, 17];
+      
+      let extendedCount = 0;
+      let totalOpenness = 0;
+      
+      for (let i = 0; i < tips.length; i++) {
+        const tip = landmarks[tips[i]];
+        const mcp = landmarks[mcps[i]];
+        
+        // Distance from tip to wrist
+        const tipDist = Math.sqrt(
+          Math.pow(tip.x - wrist.x, 2) + 
+          Math.pow(tip.y - wrist.y, 2)
+        );
+        
+        // Distance from MCP to wrist
+        const mcpDist = Math.sqrt(
+          Math.pow(mcp.x - wrist.x, 2) + 
+          Math.pow(mcp.y - wrist.y, 2)
+        );
+        
+        // If tip is further from wrist than MCP, finger is extended
+        if (tipDist > mcpDist * 1.1) {
+          extendedCount++;
+        }
+      }
+      
+      // Openness = ratio of extended fingers (0 to 1)
+      return extendedCount / 5;
+    }
+    
+    // Draw hand landmarks
+    function drawHand(landmarks) {
+      // Draw connections
+      const connections = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [5,9],[9,10],[10,11],[11,12],
+        [9,13],[13,14],[14,15],[15,16],
+        [13,17],[17,18],[18,19],[19,20],
+        [0,17]
+      ];
+      
+      canvasCtx.strokeStyle = 'rgba(0, 255, 136, 0.6)';
+      canvasCtx.lineWidth = 2;
+      
+      for (const [i, j] of connections) {
+        const p1 = landmarks[i];
+        const p2 = landmarks[j];
+        canvasCtx.beginPath();
+        canvasCtx.moveTo((1 - p1.x) * 640, p1.y * 640);
+        canvasCtx.lineTo((1 - p2.x) * 640, p2.y * 640);
+        canvasCtx.stroke();
+      }
+      
+      // Draw points
+      for (const lm of landmarks) {
+        const x = (1 - lm.x) * 640;
+        const y = lm.y * 640;
+        canvasCtx.beginPath();
+        canvasCtx.arc(x, y, 4, 0, Math.PI * 2);
+        canvasCtx.fillStyle = '#00ff88';
+        canvasCtx.fill();
+      }
+    }
+    
+    // Render parts mode
+    function renderPartsMode(openness) {
+      animCtx.clearRect(0, 0, 640, 640);
+      
+      // Draw assembled or disassembled image based on openness
+      if (openness < 0.3 && imgAssembled.complete) {
+        animCtx.globalAlpha = 1;
+        animCtx.drawImage(imgAssembled, 0, 0, 640, 640);
+      } else if (openness > 0.7 && imgDisassembled.complete) {
+        animCtx.globalAlpha = 1;
+        animCtx.drawImage(imgDisassembled, 0, 0, 640, 640);
+      } else {
+        // Transition: crossfade between images with particle effect
+        const t = (openness - 0.3) / 0.4; // 0 to 1
+        
+        if (imgAssembled.complete && imgDisassembled.complete) {
+          animCtx.globalAlpha = 1 - t;
+          animCtx.drawImage(imgAssembled, 0, 0, 640, 640);
+          animCtx.globalAlpha = t;
+          animCtx.drawImage(imgDisassembled, 0, 0, 640, 640);
+          animCtx.globalAlpha = 1;
+        }
+        
+        // Draw floating particles during transition
+        for (const p of particles) {
+          p.progress += p.speed;
+          if (p.progress > 1) p.progress = 0;
+          
+          const easeT = t;
+          const px = p.x + (p.targetX - p.x) * easeT * p.progress;
+          const py = p.y + (p.targetY - p.y) * easeT * p.progress;
+          const size = p.size * (1 - Math.abs(easeT - 0.5) * 2);
+          
+          animCtx.beginPath();
+          animCtx.arc(px, py, Math.max(size, 1), 0, Math.PI * 2);
+          animCtx.fillStyle = p.color;
+          animCtx.globalAlpha = 0.6 * (1 - Math.abs(t - 0.5) * 2);
+          animCtx.fill();
+        }
+        animCtx.globalAlpha = 1;
+      }
+    }
+    
+    // Render video mode (scrub video based on openness)
+    let videoLoaded = false;
+    const mainVideo = document.createElement('video');
+    mainVideo.src = 'animation.mp4';
+    mainVideo.muted = true;
+    mainVideo.preload = 'auto';
+    mainVideo.onloadeddata = () => { videoLoaded = true; };
+    
+    function renderVideoMode(openness) {
+      if (videoLoaded) {
+        // Map openness (0-1) to video time
+        const duration = mainVideo.duration || 7;
+        mainVideo.currentTime = openness * duration;
+        mainVideo.pause();
+      }
+    }
+    
+    // Main render loop
+    function renderFrame() {
+      if (currentMode === 'video') {
+        renderVideoMode(smoothedOpenness);
+      } else {
+        renderPartsMode(smoothedOpenness);
+      }
+      
+      // Update UI
+      opennessFill.style.width = (smoothedOpenness * 100) + '%';
+      
+      if (smoothedOpenness < 0.3) {
+        handStateEl.textContent = '✊ 收拢 — 组装状态';
+        handStateEl.style.color = '#ff6b6b';
+        fistLabel.style.opacity = 1;
+        openLabel.style.opacity = 0.3;
+      } else if (smoothedOpenness > 0.7) {
+        handStateEl.textContent = '🖐️ 张开 — 拆解状态';
+        handStateEl.style.color = '#51cf66';
+        fistLabel.style.opacity = 0.3;
+        openLabel.style.opacity = 1;
+      } else {
+        handStateEl.textContent = '🔄 过渡中...';
+        handStateEl.style.color = '#ffd43b';
+        fistLabel.style.opacity = 0.5;
+        openLabel.style.opacity = 0.5;
+      }
+      
+      requestAnimationFrame(renderFrame);
+    }
+    
+    // Initialize MediaPipe Hands
+    async function initHandTracking() {
+      try {
+        const hands = new Hands({
+          locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`;
+          }
+        });
+        
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.7,
+          minTrackingConfidence: 0.5
+        });
+        
+        hands.onResults((results) => {
+          // Clear canvas
+          canvasCtx.clearRect(0, 0, 640, 640);
+          
+          if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            handDetected = true;
+            instructionsEl.style.display = 'none';
+            
+            // Draw hand
+            drawHand(landmarks);
+            
+            // Calculate openness
+            const rawOpenness = calcHandOpenness(landmarks);
+            
+            // Smooth the value
+            smoothedOpenness += (rawOpenness - smoothedOpenness) * 0.15;
+            smoothedOpenness = Math.max(0, Math.min(1, smoothedOpenness));
+            
+            statusEl.textContent = '✅ 手势识别中';
+            statusEl.style.color = '#51cf66';
+          } else {
+            handDetected = false;
+            instructionsEl.style.display = 'block';
+            instructionsEl.innerHTML = `
+              <div class="icon">🖐️</div>
+              <div>未检测到手部</div>
+              <div style="font-size:13px; margin-top:8px; color:#666">
+                请将手放在摄像头前
+              </div>
+            `;
+            statusEl.textContent = '⚠️ 未检测到手部';
+            statusEl.style.color = '#ffd43b';
+          }
+        });
+        
+        // Start camera
+        const camera = new Camera(videoElement, {
+          onFrame: async () => {
+            await hands.send({ image: videoElement });
+          },
+          width: 640,
+          height: 640
+        });
+        
+        await camera.start();
+        
+        statusEl.textContent = '✅ 摄像头已就绪，请伸手';
+        instructionsEl.innerHTML = `
+          <div class="icon">🖐️</div>
+          <div>请将手放在摄像头前</div>
+          <div style="font-size:13px; margin-top:8px; color:#666">
+            ✋ 手掌张开 → 零件散开<br>
+            ✊ 握拳收拢 → 零件归位
+          </div>
+        `;
+        
+        // Start render loop
+        renderFrame();
+        
+      } catch (err) {
+        console.error('Hand tracking error:', err);
+        statusEl.textContent = '❌ 加载失败: ' + err.message;
+        statusEl.style.color = '#ff6b6b';
+      }
+    }
+    
+    // Start
+    initHandTracking();
+  </script>
+</body>
+</html>
