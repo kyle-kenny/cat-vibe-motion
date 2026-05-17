@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>点击拆装动画</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #fff;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      user-select: none;
+    }
+    #scene { position: relative; width: 640px; height: 640px; }
+    canvas {
+      width: 640px; height: 640px;
+      border-radius: 16px;
+    }
+    #mainCanvas { z-index: 1; }
+    #fxCanvas {
+      position: absolute; top: 0; left: 0;
+      width: 640px; height: 640px;
+      border-radius: 16px;
+      z-index: 2; pointer-events: none;
+    }
+    #hint {
+      position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.6); padding: 10px 24px; border-radius: 24px;
+      font-size: 14px; color: #aaa; backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.08);
+      transition: opacity 0.5s; pointer-events: none; z-index: 10;
+    }
+    #stateLabel {
+      position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
+      font-size: 20px; font-weight: 600;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.6); z-index: 10;
+    }
+    #progressBar {
+      position: absolute; bottom: 64px; left: 50%; transform: translateX(-50%);
+      width: 200px; height: 4px; background: rgba(255,255,255,0.1);
+      border-radius: 2px; overflow: hidden; z-index: 10;
+    }
+    #progressFill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #51cf66, #ffd43b, #ff6b6b);
+      border-radius: 2px;
+    }
+    #loading {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      text-align: center; z-index: 20;
+    }
+    #loadingBar {
+      width: 200px; height: 6px; background: rgba(255,255,255,0.1);
+      border-radius: 3px; overflow: hidden; margin-top: 12px;
+    }
+    #loadingFill {
+      height: 100%; width: 0%; background: #00ff88; border-radius: 3px;
+      transition: width 0.2s;
+    }
+    .vignette {
+      position: absolute; top: 0; left: 0; width: 640px; height: 640px;
+      border-radius: 16px; pointer-events: none; z-index: 3;
+      background: radial-gradient(circle at center, transparent 40%, rgba(0,0,0,0.45) 100%);
+    }
+  </style>
+</head>
+<body>
+  <div id="scene">
+    <canvas id="mainCanvas" class="mainCanvas" width="640" height="640"></canvas>
+    <canvas id="fxCanvas" width="640" height="640"></canvas>
+    <div class="vignette"></div>
+    <div id="loading">
+      <div>⏳ 正在解码视频帧...</div>
+      <div id="loadingBar"><div id="loadingFill"></div></div>
+      <div id="loadingText" style="font-size:12px;color:#666;margin-top:6px">0%</div>
+    </div>
+    <div id="stateLabel" style="opacity:0">📦 完整产品</div>
+    <div id="progressBar" style="opacity:0"><div id="progressFill"></div></div>
+    <div id="hint" style="opacity:0">👆 点击切换拆装状态</div>
+  </div>
+
+  <video id="decoder" style="display:none" muted playsinline></video>
+
+  <script>
+    const mainCanvas = document.getElementById('mainCanvas');
+    const ctx = mainCanvas.getContext('2d');
+    const fxCanvas = document.getElementById('fxCanvas');
+    const fctx = fxCanvas.getContext('2d');
+    const loadingEl = document.getElementById('loading');
+    const loadingFill = document.getElementById('loadingFill');
+    const loadingText = document.getElementById('loadingText');
+    const stateLabel = document.getElementById('stateLabel');
+    const progressFill = document.getElementById('progressFill');
+    const hint = document.getElementById('hint');
+    const decoder = document.getElementById('decoder');
+
+    const TARGET_FPS = 30;
+    const DECODE_SIZE = 480;  // decode at lower res for speed
+
+    let frames = [];         // ImageBitmap array
+    let totalFrames = 0;
+    let currentFrame = 0;
+    let targetFrame = 0;
+    let isAssembled = true;
+    let animating = false;
+
+    // Particle system
+    const particles = [];
+    const PARTICLE_COUNT = 60;
+
+    function spawnBurst() {
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        particles.push({
+          x: 320 + (Math.random() - 0.5) * 80,
+          y: 320 + (Math.random() - 0.5) * 80,
+          vx: (Math.random() - 0.5) * 12,
+          vy: (Math.random() - 0.5) * 12,
+          size: 2 + Math.random() * 8,
+          hue: Math.random() * 60 + 20,
+          life: 0,
+          maxLife: 25 + Math.random() * 35
+        });
+      }
+    }
+
+    // Decode video to ImageBitmap frames
+    async function decodeVideo() {
+      decoder.src = 'animation.mp4';
+
+      await new Promise((resolve) => {
+        decoder.onloadeddata = resolve;
+      });
+
+      const dur = decoder.duration;
+      totalFrames = Math.ceil(dur * TARGET_FPS);
+
+      // Create offscreen canvas for decoding
+      const offCanvas = document.createElement('canvas');
+      // Keep aspect ratio
+      const aspect = decoder.videoWidth / decoder.videoHeight;
+      offCanvas.width = DECODE_SIZE;
+      offCanvas.height = DECODE_SIZE / aspect;
+      const offCtx = offCanvas.getContext('2d');
+
+      frames = [];
+
+      for (let i = 0; i < totalFrames; i++) {
+        decoder.currentTime = (i / TARGET_FPS);
+
+        // Wait for seek to complete
+        await new Promise((resolve) => {
+          decoder.onseeked = resolve;
+        });
+
+        offCtx.drawImage(decoder, 0, 0, offCanvas.width, offCanvas.height);
+
+        // Create ImageBitmap from canvas
+        const bitmap = await createImageBitmap(offCanvas);
+        frames.push(bitmap);
+
+        // Update progress
+        const pct = Math.round(((i + 1) / totalFrames) * 100);
+        loadingFill.style.width = pct + '%';
+        loadingText.textContent = `帧 ${i + 1}/${totalFrames} (${pct}%)`;
+
+        // Yield to browser every 5 frames
+        if (i % 5 === 0) await new Promise(r => requestAnimationFrame(r));
+      }
+
+      // Done
+      loadingEl.style.opacity = '0';
+      setTimeout(() => {
+        loadingEl.style.display = 'none';
+        stateLabel.style.opacity = '1';
+        document.getElementById('progressBar').style.opacity = '1';
+        hint.style.opacity = '1';
+      }, 300);
+
+      // Draw first frame
+      drawFrame(0);
+    }
+
+    function drawFrame(idx) {
+      idx = Math.max(0, Math.min(frames.length - 1, Math.round(idx)));
+      if (frames[idx]) {
+        // Center the decoded frame on 640x640
+        const fw = frames[idx].width;
+        const fh = frames[idx].height;
+        const scale = Math.max(640 / fw, 640 / fh);
+        const dw = fw * scale;
+        const dh = fh * scale;
+        const dx = (640 - dw) / 2;
+        const dy = (640 - dh) / 2;
+
+        ctx.clearRect(0, 0, 640, 640);
+        ctx.drawImage(frames[idx], dx, dy, dw, dh);
+      }
+    }
+
+    // Smooth animation loop
+    function animate() {
+      const diff = targetFrame - currentFrame;
+
+      if (Math.abs(diff) > 0.5) {
+        // Ease toward target
+        currentFrame += diff * 0.12;
+        animating = true;
+      } else {
+        currentFrame = targetFrame;
+        if (animating) {
+          animating = false;
+        }
+      }
+
+      drawFrame(currentFrame);
+
+      // Update UI
+      const pct = (currentFrame / (frames.length - 1)) * 100;
+      progressFill.style.width = pct + '%';
+
+      const ratio = currentFrame / (frames.length - 1);
+      if (ratio < 0.15) {
+        stateLabel.textContent = '📦 完整产品';
+        stateLabel.style.color = '#51cf66';
+      } else if (ratio > 0.85) {
+        stateLabel.textContent = '🔧 拆解零件';
+        stateLabel.style.color = '#ff6b6b';
+      } else {
+        stateLabel.textContent = '✨ 变换中...';
+        stateLabel.style.color = '#ffd43b';
+      }
+
+      // Render particles
+      fctx.clearRect(0, 0, 640, 640);
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life++;
+        if (p.life > p.maxLife) { particles.splice(i, 1); continue; }
+
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.94;
+        p.vy *= 0.94;
+
+        const alpha = (1 - p.life / p.maxLife) * 0.7;
+
+        // Glow
+        const grad = fctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 3);
+        grad.addColorStop(0, `hsla(${p.hue}, 90%, 65%, ${alpha})`);
+        grad.addColorStop(1, `hsla(${p.hue}, 90%, 65%, 0)`);
+        fctx.beginPath();
+        fctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2);
+        fctx.fillStyle = grad;
+        fctx.fill();
+
+        // Core
+        fctx.beginPath();
+        fctx.arc(p.x, p.y, p.size * 0.4, 0, Math.PI * 2);
+        fctx.fillStyle = `hsla(${p.hue}, 90%, 85%, ${alpha})`;
+        fctx.fill();
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    // Click
+    document.body.addEventListener('click', () => {
+      if (frames.length === 0) return;
+      isAssembled = !isAssembled;
+      targetFrame = isAssembled ? 0 : frames.length - 1;
+      spawnBurst();
+      hint.style.opacity = '0';
+    });
+
+    // Go
+    decodeVideo().then(() => {
+      animate();
+    });
+  </script>
+</body>
+</html>
