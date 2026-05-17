@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>点击拆装动画</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a; color: #fff;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden; height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; user-select: none;
+    }
+    #scene {
+      position: relative; width: 640px; height: 640px;
+      perspective: 800px;
+    }
+    #mainCanvas {
+      width: 640px; height: 640px; border-radius: 16px; z-index: 1;
+      transition: transform 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                  opacity 0.8s ease;
+    }
+    #fxCanvas {
+      position: absolute; top: 0; left: 0;
+      width: 640px; height: 640px; border-radius: 16px;
+      z-index: 2; pointer-events: none;
+    }
+    .vignette {
+      position: absolute; top: 0; left: 0; width: 640px; height: 640px;
+      border-radius: 16px; pointer-events: none; z-index: 3;
+      background: radial-gradient(circle at center, transparent 30%, rgba(0,0,0,0.5) 100%);
+    }
+    #stateLabel {
+      position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
+      font-size: 18px; font-weight: 500; z-index: 10;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.6);
+      letter-spacing: 2px;
+    }
+    #progressBar {
+      position: absolute; bottom: 56px; left: 50%; transform: translateX(-50%);
+      width: 180px; height: 3px; background: rgba(255,255,255,0.08);
+      border-radius: 2px; overflow: hidden; z-index: 10;
+    }
+    #progressFill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #51cf66, #ffd43b, #ff6b6b);
+      border-radius: 2px;
+    }
+    #hint {
+      position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.5); padding: 10px 28px; border-radius: 24px;
+      font-size: 13px; color: rgba(255,255,255,0.5);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.06);
+      transition: opacity 0.8s ease; pointer-events: none; z-index: 10;
+      letter-spacing: 1px;
+    }
+    #loading {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      text-align: center; z-index: 20;
+    }
+    #loadingBar {
+      width: 180px; height: 2px; background: rgba(255,255,255,0.08);
+      border-radius: 1px; overflow: hidden; margin-top: 16px;
+    }
+    #loadingFill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, transparent, rgba(0,255,136,0.6));
+      border-radius: 1px;
+    }
+    #loadingText {
+      font-size: 12px; color: rgba(255,255,255,0.3); letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div id="scene">
+    <canvas id="mainCanvas" width="640" height="640"></canvas>
+    <canvas id="fxCanvas" width="640" height="640"></canvas>
+    <div class="vignette"></div>
+    <div id="loading">
+      <div id="loadingText">LOADING</div>
+      <div id="loadingBar"><div id="loadingFill"></div></div>
+    </div>
+    <div id="stateLabel" style="opacity:0; color: #51cf66">ASSEMBLED</div>
+    <div id="progressBar" style="opacity:0"><div id="progressFill"></div></div>
+    <div id="hint" style="opacity:0">CLICK TO TOGGLE</div>
+  </div>
+
+  <script>
+    // ============================================================
+    // Vibe-Motion Style Click Animation
+    // Smooth, cinematic, deliberate transitions
+    // ============================================================
+
+    const canvas = document.getElementById('mainCanvas');
+    const ctx = canvas.getContext('2d');
+    const fxC = document.getElementById('fxCanvas');
+    const fctx = fxC.getContext('2d');
+
+    const loadingText = document.getElementById('loadingText');
+    const loadingFill = document.getElementById('loadingFill');
+    const loadingEl = document.getElementById('loading');
+    const stateLabel = document.getElementById('stateLabel');
+    const progressFill = document.getElementById('progressFill');
+    const hint = document.getElementById('hint');
+
+    const W = 640, H = 640;
+    const FPS = 24;
+
+    let frames = [];
+    let totalFrames = 0;
+    let progress = 0;          // 0..1 current
+    let targetProgress = 0;    // 0..1 target
+    let isAssembled = true;
+    let ready = false;
+
+    // === Cinematic easing curves ===
+    // Smooth, slow, deliberate - like a premium product reveal
+    function easeOutExpo(t) {
+      return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+    }
+    function easeInOutCubic(t) {
+      return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+    }
+    function easeOutQuart(t) {
+      return 1 - Math.pow(1 - t, 4);
+    }
+
+    // === Smooth interpolation state ===
+    let smoothProgress = 0;
+    let velocity = 0;
+    const STIFFNESS = 0.008;  // much slower, cinematic
+    const DAMPING = 0.88;     // gentle settle
+    const PRECISION = 0.0001;
+
+    // === Particle system ===
+    let particles = [];
+    const PARTICLE_COUNT = 70;
+
+    function createParticle(burstDir) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 0.5 + Math.random() * 3;
+      const spread = burstDir ? 1 : 0.3;
+      return {
+        x: W/2 + (Math.random()-0.5) * 60,
+        y: H/2 + (Math.random()-0.5) * 60,
+        vx: Math.cos(angle) * speed * spread,
+        vy: Math.sin(angle) * speed * spread,
+        size: 1 + Math.random() * 5,
+        hue: Math.random() * 40 + 20,
+        life: 0,
+        maxLife: 40 + Math.random() * 60,
+        delay: Math.random() * 30,
+        rotSpeed: (Math.random() - 0.5) * 0.05
+      };
+    }
+
+    function spawnParticles(burst) {
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        particles.push(createParticle(burst));
+      }
+    }
+
+    // === Floating ambient particles ===
+    let ambientParticles = [];
+    for (let i = 0; i < 20; i++) {
+      ambientParticles.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: (Math.random()-0.5) * 0.15,
+        vy: -0.1 - Math.random() * 0.15,
+        size: 1 + Math.random() * 2,
+        alpha: 0.1 + Math.random() * 0.2,
+        hue: 120 + Math.random() * 40
+      });
+    }
+
+    // === Load video ===
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.src = 'animation.mp4';
+    video.load();
+
+    video.addEventListener('loadeddata', async () => {
+      totalFrames = Math.ceil(video.duration * FPS);
+
+      const off = document.createElement('canvas');
+      off.width = video.videoWidth;
+      off.height = video.videoHeight;
+      const offCtx = off.getContext('2d');
+
+      loadingText.textContent = 'DECODING';
+
+      for (let i = 0; i < totalFrames; i++) {
+        video.currentTime = i / FPS;
+        await new Promise(r => {
+          video.onseeked = r;
+          setTimeout(r, 300);
+        });
+
+        offCtx.drawImage(video, 0, 0);
+
+        try {
+          frames.push(await createImageBitmap(off));
+        } catch(e) {
+          const c = document.createElement('canvas');
+          c.width = off.width; c.height = off.height;
+          c.getContext('2d').drawImage(off, 0, 0);
+          frames.push(c);
+        }
+
+        const pct = Math.round((i+1)/totalFrames * 100);
+        loadingFill.style.width = pct + '%';
+        if (i % 4 === 0) await new Promise(r => setTimeout(r, 0));
+      }
+
+      ready = true;
+      loadingEl.style.opacity = '0';
+      setTimeout(() => {
+        loadingEl.style.display = 'none';
+        stateLabel.style.opacity = '1';
+        document.getElementById('progressBar').style.opacity = '1';
+        hint.style.opacity = '1';
+      }, 500);
+
+      drawFrame(0);
+      loop();
+    });
+
+    video.addEventListener('error', () => {
+      loadingText.textContent = 'ERROR: animation.mp4 not found';
+    });
+
+    // === Draw frame ===
+    function drawFrame(progress) {
+      const idx = Math.round(progress * (frames.length - 1));
+      const frame = frames[Math.max(0, Math.min(frames.length-1, idx))];
+      if (!frame) return;
+
+      ctx.clearRect(0, 0, W, H);
+
+      const fw = frame.width || frame.videoWidth;
+      const fh = frame.height || frame.videoHeight;
+      const scale = Math.max(W/fw, H/fh);
+      const dw = fw * scale, dh = fh * scale;
+
+      // Subtle scale effect during transition
+      const transAmount = Math.sin(progress * Math.PI);
+      const extraScale = 1 + transAmount * 0.03;
+
+      ctx.save();
+      ctx.translate(W/2, H/2);
+      ctx.scale(extraScale, extraScale);
+      ctx.drawImage(frame, -dw/2, -dh/2, dw, dh);
+      ctx.restore();
+    }
+
+    // === Main loop ===
+    function loop() {
+      // Spring physics for smooth motion
+      const force = (targetProgress - smoothProgress) * STIFFNESS;
+      velocity = (velocity + force) * DAMPING;
+      smoothProgress += velocity;
+
+      if (Math.abs(smoothProgress - targetProgress) < PRECISION &&
+          Math.abs(velocity) < PRECISION) {
+        smoothProgress = targetProgress;
+      }
+
+      smoothProgress = Math.max(0, Math.min(1, smoothProgress));
+
+      drawFrame(smoothProgress);
+
+      // Update UI
+      progressFill.style.width = (smoothProgress * 100) + '%';
+
+      if (smoothProgress < 0.08) {
+        stateLabel.textContent = 'ASSEMBLED';
+        stateLabel.style.color = '#51cf66';
+      } else if (smoothProgress > 0.92) {
+        stateLabel.textContent = 'DISASSEMBLED';
+        stateLabel.style.color = '#ff6b6b';
+      } else {
+        stateLabel.textContent = 'TRANSITIONING';
+        stateLabel.style.color = '#ffd43b';
+      }
+
+      // === Render particles ===
+      fctx.clearRect(0, 0, W, H);
+
+      // Ambient particles (always floating)
+      for (const p of ambientParticles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.y < -10) { p.y = H + 10; p.x = Math.random() * W; }
+        if (p.x < -10) p.x = W + 10;
+        if (p.x > W + 10) p.x = -10;
+
+        fctx.beginPath();
+        fctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        fctx.fillStyle = `hsla(${p.hue}, 60%, 70%, ${p.alpha})`;
+        fctx.fill();
+      }
+
+      // Burst particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life++;
+        if (p.life > p.maxLife + p.delay) {
+          particles.splice(i, 1);
+          continue;
+        }
+        if (p.life < p.delay) continue;
+
+        const elapsed = p.life - p.delay;
+        const t = elapsed / p.maxLife;
+
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.97;
+        p.vy *= 0.97;
+
+        // Fade in then out
+        const fadeIn = Math.min(1, elapsed / 10);
+        const fadeOut = 1 - Math.pow(t, 2);
+        const alpha = fadeIn * fadeOut * 0.6;
+
+        const size = p.size * (1 + t * 0.5);
+
+        // Soft glow
+        const grad = fctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 4);
+        grad.addColorStop(0, `hsla(${p.hue}, 80%, 65%, ${alpha})`);
+        grad.addColorStop(0.5, `hsla(${p.hue}, 80%, 65%, ${alpha * 0.3})`);
+        grad.addColorStop(1, `hsla(${p.hue}, 80%, 65%, 0)`);
+        fctx.beginPath();
+        fctx.arc(p.x, p.y, size * 4, 0, Math.PI * 2);
+        fctx.fillStyle = grad;
+        fctx.fill();
+      }
+
+      // === Progress ring glow ===
+      const ringProgress = smoothProgress;
+      const ringAlpha = Math.sin(ringProgress * Math.PI) * 0.15;
+      if (ringAlpha > 0.01) {
+        const ringGrad = fctx.createRadialGradient(W/2, H/2, 100, W/2, H/2, 300);
+        ringGrad.addColorStop(0, `rgba(0, 255, 136, 0)`);
+        ringGrad.addColorStop(0.5, `rgba(0, 255, 136, ${ringAlpha})`);
+        ringGrad.addColorStop(1, `rgba(0, 255, 136, 0)`);
+        fctx.fillStyle = ringGrad;
+        fctx.fillRect(0, 0, W, H);
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    // === Click / Touch ===
+    function toggle() {
+      if (!ready) return;
+      isAssembled = !isAssembled;
+      targetProgress = isAssembled ? 0 : 1;
+      spawnParticles(true);
+      hint.style.opacity = '0';
+    }
+
+    document.addEventListener('click', toggle);
+    document.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      toggle();
+    });
+  </script>
+</body>
+</html>
